@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>五子棋遊戲 - 10×10 MCTS 防守進階 AI (一步必勝)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 20px;
+    }
+    canvas {
+      background-color: #f0d9b5;
+      border: 1px solid #333;
+    }
+    #controls {
+      margin-top: 10px;
+    }
+    #message {
+      margin-top: 10px;
+      font-size: 1.2em;
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <h1>五子棋遊戲 (10×10)</h1>
+  <canvas id="board" width="600" height="600"></canvas>
+  <div id="controls">
+    <label for="difficulty">電腦難度：</label>
+    <select id="difficulty">
+      <option value="1000">簡單 (1000 次模擬)</option>
+      <option value="5000">中等 (5000 次模擬)</option>
+      <option value="10000">困難 (10000 次模擬)</option>
+    </select>
+    <button id="reset">重新開始</button>
+  </div>
+  <div id="message"></div>
+
+  <script>
+    // ──────────────────────────────
+    // 基本參數設定
+    // ──────────────────────────────
+    const boardSize = 10;             // 10×10 棋盤
+    const canvasSize = 600;
+    const cellSize = canvasSize / boardSize;
+    let board = [];                   // 棋盤：0 表示空，1 表示玩家，2 表示電腦
+    let gameOver = false;
+    let currentPlayer = 1;            // 玩家先手
+
+    const canvas = document.getElementById("board");
+    const ctx = canvas.getContext("2d");
+    const difficultySelect = document.getElementById("difficulty");
+    const resetButton = document.getElementById("reset");
+    const messageDiv = document.getElementById("message");
+
+    // ──────────────────────────────
+    // 初始化棋盤與畫面繪製
+    // ──────────────────────────────
+    function initBoard() {
+      board = [];
+      for (let i = 0; i < boardSize; i++) {
+        let row = [];
+        for (let j = 0; j < boardSize; j++) {
+          row.push(0);
+        }
+        board.push(row);
+      }
+      gameOver = false;
+      currentPlayer = 1;
+      messageDiv.textContent = "玩家下棋 (黑子)";
+      drawBoard();
+    }
+
+    function drawBoard() {
+      ctx.clearRect(0, 0, canvasSize, canvasSize);
+      ctx.strokeStyle = "#333";
+      // 畫格線
+      for (let i = 0; i < boardSize; i++) {
+        ctx.beginPath();
+        ctx.moveTo(cellSize / 2, cellSize / 2 + i * cellSize);
+        ctx.lineTo(canvasSize - cellSize / 2, cellSize / 2 + i * cellSize);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cellSize / 2 + i * cellSize, cellSize / 2);
+        ctx.lineTo(cellSize / 2 + i * cellSize, canvasSize - cellSize / 2);
+        ctx.stroke();
+      }
+      // 畫棋子
+      for (let i = 0; i < boardSize; i++) {
+        for (let j = 0; j < boardSize; j++) {
+          if (board[i][j] !== 0) {
+            drawStone(i, j, board[i][j] === 1 ? "black" : "white");
+          }
+        }
+      }
+    }
+
+    function drawStone(row, col, color) {
+      const x = col * cellSize + cellSize / 2;
+      const y = row * cellSize + cellSize / 2;
+      const radius = cellSize * 0.4;
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, 2 * Math.PI);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#333";
+      ctx.stroke();
+    }
+
+    // 玩家點擊事件：玩家下棋後檢查勝負，再觸發電腦回合
+    canvas.addEventListener("click", function(e) {
+      if (gameOver || currentPlayer !== 1) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const col = Math.floor(x / cellSize);
+      const row = Math.floor(y / cellSize);
+      if (board[row][col] === 0) {
+        board[row][col] = 1;
+        drawBoard();
+        if (checkWin(row, col, 1)) {
+          gameOver = true;
+          messageDiv.textContent = "玩家獲勝！";
+          return;
+        }
+        currentPlayer = 2;
+        messageDiv.textContent = "電腦下棋 (白子)";
+        setTimeout(computerMove, 500);
+      }
+    });
+
+    // ──────────────────────────────
+    // 勝負判斷：檢查 (row, col) 放置 player 後是否獲勝
+    // ──────────────────────────────
+    function checkWin(row, col, player) {
+      const directions = [
+        { dx: 1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 1, dy: 1 },
+        { dx: 1, dy: -1 }
+      ];
+      for (const {dx, dy} of directions) {
+        let count = 1;
+        let r = row + dy, c = col + dx;
+        while (isValid(r, c) && board[r][c] === player) { count++; r += dy; c += dx; }
+        r = row - dy; c = col - dx;
+        while (isValid(r, c) && board[r][c] === player) { count++; r -= dy; c -= dx; }
+        if (count >= 5) return true;
+      }
+      return false;
+    }
+
+    function isValid(row, col) {
+      return row >= 0 && row < boardSize && col >= 0 && col < boardSize;
+    }
+
+    // ──────────────────────────────
+    // 合法走法：候選走法篩選
+    // 只考慮空格中位於所有棋子邊界擴展 2 格範圍內的點
+    // ──────────────────────────────
+    function getLegalMoves(boardState) {
+      let moves = [];
+      let minRow = boardSize, maxRow = -1, minCol = boardSize, maxCol = -1;
+      // 找出所有已下棋子的邊界
+      for (let i = 0; i < boardSize; i++) {
+        for (let j = 0; j < boardSize; j++) {
+          if (boardState[i][j] !== 0) {
+            if (i < minRow) minRow = i;
+            if (i > maxRow) maxRow = i;
+            if (j < minCol) minCol = j;
+            if (j > maxCol) maxCol = j;
+          }
+        }
+      }
+      // 若棋盤全空，則返回全部走法
+      if (maxRow === -1) {
+        for (let i = 0; i < boardSize; i++) {
+          for (let j = 0; j < boardSize; j++) {
+            moves.push({row: i, col: j});
+          }
+        }
+        return moves;
+      }
+      // 邊界擴展 margin 改為 2 格
+      const margin = 2;
+      minRow = Math.max(0, minRow - margin);
+      maxRow = Math.min(boardSize - 1, maxRow + margin);
+      minCol = Math.max(0, minCol - margin);
+      maxCol = Math.min(boardSize - 1, maxCol + margin);
+      for (let i = minRow; i <= maxRow; i++) {
+        for (let j = minCol; j <= maxCol; j++) {
+          if (boardState[i][j] === 0) {
+            moves.push({ row: i, col: j });
+          }
+        }
+      }
+      return moves;
+    }
+
+    // 複製棋盤（深複製）
+    function cloneBoard(boardState) {
+      return boardState.map(row => row.slice());
+    }
+
+    // ──────────────────────────────
+    // 改進型啟發式評分函式
+    // 除了基本連線長度評分外，還根據各方向抽取棋線字串，
+    // 利用預先定義的棋型模式（如活四、眠四、活三、眠三）給予額外加分。
+    // 傳入參數 player 表示模擬下棋者（1 或 2）
+    // ──────────────────────────────
+    function evaluateHeuristicAdvanced(boardState, row, col, player) {
+      let score = 0;
+      const directions = [
+        { dx: 1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 1, dy: 1 },
+        { dx: 1, dy: -1 }
+      ];
+      for (const {dx, dy} of directions) {
+        let count = 1;
+        let r = row + dy, c = col + dx;
+        while (isValid(r, c) && boardState[r][c] === player) { count++; r += dy; c += dx; }
+        r = row - dy; c = col - dx;
+        while (isValid(r, c) && boardState[r][c] === player) { count++; r -= dy; c -= dx; }
+        if (count >= 5) score += 10000;
+        else score += Math.pow(10, count - 1);
+        score += evaluatePatterns(boardState, row, col, dx, dy, player);
+      }
+      return score;
+    }
+
+    // 根據指定方向抽取棋線字串，並根據預定棋型模式給予額外加分
+    // 抽取範圍從 -5 到 +5（共 11 格），中心索引改為 5
+    function evaluatePatterns(boardState, row, col, dx, dy, player) {
+      let bonus = 0;
+      let line = "";
+      for (let offset = -5; offset <= 5; offset++) {
+        let r = row + offset * dy;
+        let c = col + offset * dx;
+        if (isValid(r, c)) line += boardState[r][c].toString();
+        else line += "X"; // X 表示邊界
+      }
+      const centerIndex = 5;
+      line = line.substr(0, centerIndex) + player.toString() + line.substr(centerIndex + 1);
+      
+      let patterns = [];
+      if (player === 2) {
+        patterns = [
+          { regex: /0(2){4}0/, bonus: 5000 },          // 活四
+          { regex: /(1|X)(2){4}0|0(2){4}(1|X)/, bonus: 3000 }, // 眠四
+          { regex: /0(2){3}0/, bonus: 500 },             // 活三
+          { regex: /(1|X)(2){3}0|0(2){3}(1|X)/, bonus: 300 }      // 眠三
+        ];
+      } else {
+        patterns = [
+          { regex: /0(1){4}0/, bonus: 5000 },
+          { regex: /(2|X)(1){4}0|0(1){4}(2|X)/, bonus: 3000 },
+          { regex: /0(1){3}0/, bonus: 500 },
+          { regex: /(2|X)(1){3}0|0(1){3}(2|X)/, bonus: 300 }
+        ];
+      }
+      for (let patternObj of patterns) {
+        if (patternObj.regex.test(line)) bonus += patternObj.bonus;
+      }
+      return bonus;
+    }
+
+    // ──────────────────────────────
+    // 模擬前先檢查直接致勝走法
+    function findImmediateWin(boardState, currentP) {
+      const moves = getLegalMoves(boardState);
+      for (let move of moves) {
+        boardState[move.row][move.col] = currentP;
+        if (checkWinBoard(boardState, move.row, move.col, currentP)) {
+          boardState[move.row][move.col] = 0;
+          return move;
+        }
+        boardState[move.row][move.col] = 0;
+      }
+      return null;
+    }
+
+    // 檢查指定局面是否獲勝（模擬用）
+    function checkWinBoard(boardState, row, col, player) {
+      const directions = [
+        { dx: 1, dy: 0 },
+        { dx: 0, dy: 1 },
+        { dx: 1, dy: 1 },
+        { dx: 1, dy: -1 }
+      ];
+      for (const {dx, dy} of directions) {
+        let count = 1;
+        let r = row + dy, c = col + dx;
+        while (isValid(r, c) && boardState[r][c] === player) { count++; r += dy; c += dx; }
+        r = row - dy; c = col - dx;
+        while (isValid(r, c) && boardState[r][c] === player) { count++; r -= dy; c -= dx; }
+        if (count >= 5) return true;
+      }
+      return false;
+    }
+
+    // ──────────────────────────────
+    // 模擬走完遊戲（playout）
+    // 每一步模擬前先檢查是否有致勝或必防走法，若有則直接採用，
+    // 否則以加權啟發式隨機選擇走法。
+    function simulateRandomGame(boardState, currentP) {
+      while (true) {
+        let moves = getLegalMoves(boardState);
+        if (moves.length === 0) return 0; // 平手
+
+        // 檢查自己是否有致勝走法
+        let winMove = findImmediateWin(boardState, currentP);
+        if (winMove) { boardState[winMove.row][winMove.col] = currentP; return currentP; }
+
+        // 檢查對手是否有致勝走法，若有則必須防守
+        let blockMove = findImmediateWin(boardState, 3 - currentP);
+        if (blockMove) {
+          boardState[blockMove.row][blockMove.col] = currentP;
+        } else {
+          // 否則以加權啟發式選擇走法
+          let move = selectHeuristicMoveAdvanced(boardState, currentP);
+          boardState[move.row][move.col] = currentP;
+        }
+        if (findImmediateWin(boardState, currentP)) return currentP;
+        currentP = 3 - currentP;
+      }
+    }
+
+    // ──────────────────────────────
+    // 利用改進型啟發式評分選擇走法
+    // 防守權重進一步提高：對手評分乘以 2.0
+    function selectHeuristicMoveAdvanced(boardState, currentP) {
+      const moves = getLegalMoves(boardState);
+      let totalWeight = 0;
+      const weightedMoves = [];
+      for (let move of moves) {
+        boardState[move.row][move.col] = currentP;
+        const selfScore = evaluateHeuristicAdvanced(boardState, move.row, move.col, currentP);
+        boardState[move.row][move.col] = 0;
+        boardState[move.row][move.col] = 3 - currentP;
+        const oppScore = evaluateHeuristicAdvanced(boardState, move.row, move.col, 3 - currentP);
+        boardState[move.row][move.col] = 0;
+        const weight = selfScore + 2.0 * oppScore;
+        weightedMoves.push({ move, weight });
+        totalWeight += weight;
+      }
+      if (totalWeight === 0) return moves[Math.floor(Math.random() * moves.length)];
+      const rand = Math.random() * totalWeight;
+      let accum = 0;
+      for (let item of weightedMoves) {
+        accum += item.weight;
+        if (accum >= rand) return item.move;
+      }
+      return moves[moves.length - 1];
+    }
+
+    // ──────────────────────────────
+    // MCTS 節點物件
+    // ──────────────────────────────
+    function MCTSNode(boardState, parent, move, player) {
+      this.board = boardState; // 深複製後的局面
+      this.parent = parent;
+      this.move = move;        // 從父節點到本節點的走法（根節點為 null）
+      this.player = player;    // 到本節點時輪到哪個玩家下棋
+      this.wins = 0;
+      this.visits = 0;
+      this.children = [];
+      this.untriedMoves = getLegalMoves(boardState);
+    }
+
+    // UCT 選擇子節點
+    function selectChild(node) {
+      let bestChild = null;
+      let bestValue = -Infinity;
+      for (let child of node.children) {
+        const uctValue = (child.wins / child.visits) + Math.sqrt(2 * Math.log(node.visits) / child.visits);
+        if (uctValue > bestValue) {
+          bestValue = uctValue;
+          bestChild = child;
+        }
+      }
+      return bestChild;
+    }
+
+    // ──────────────────────────────
+    // MCTS 主流程：Selection / Expansion / Simulation / Backpropagation
+    // ──────────────────────────────
+    function mcts(root, iterations) {
+      for (let i = 0; i < iterations; i++) {
+        let node = root;
+        let boardCopy = cloneBoard(root.board);
+        let currentP = root.player;
+
+        // 1. Selection：沿著樹向下選擇
+        while (node.untriedMoves.length === 0 && node.children.length > 0) {
+          node = selectChild(node);
+          boardCopy[node.move.row][node.move.col] = (node.parent.player === 2 ? 2 : 1);
+          currentP = node.player;
+        }
+
+        // 2. Expansion：若還有未嘗試走法，隨機展開一個
+        if (node.untriedMoves.length > 0) {
+          const index = Math.floor(Math.random() * node.untriedMoves.length);
+          const move = node.untriedMoves.splice(index, 1)[0];
+          boardCopy[move.row][move.col] = currentP;
+          const child = new MCTSNode(cloneBoard(boardCopy), node, move, 3 - currentP);
+          node.children.push(child);
+          node = child;
+          currentP = 3 - currentP;
+        }
+
+        // 3. Simulation：從展開節點開始以改進型啟發式模擬走完遊戲
+        const winner = simulateRandomGame(cloneBoard(boardCopy), currentP);
+
+        // 4. Backpropagation：反向更新節點資訊
+        let tempNode = node;
+        while (tempNode !== null) {
+          tempNode.visits++;
+          if (winner === 2) tempNode.wins++;
+          tempNode = tempNode.parent;
+        }
+      }
+    }
+
+    // 電腦利用 MCTS 選擇最佳走法，模擬次數由下拉選單控制
+    function mctsMove(iterations) {
+      const root = new MCTSNode(cloneBoard(board), null, null, 2);
+      mcts(root, iterations);
+      if (root.children.length === 0) return getRandomMove();
+      const bestChild = root.children.reduce((a, b) => (a.visits > b.visits ? a : b));
+      return bestChild.move;
+    }
+
+    // 備用：隨機選擇一個合法走法（極端情況下使用）
+    function getRandomMove() {
+      const moves = getLegalMoves(board);
+      return moves[Math.floor(Math.random() * moves.length)];
+    }
+
+    // ──────────────────────────────
+    // 【重點】電腦下棋：若電腦一步就能獲勝，必須下那一步
+    function computerMove() {
+      if (gameOver) return;
+      // 先檢查電腦是否有一步可直接致勝
+      let immediateWin = findImmediateWin(board, 2);
+      if (immediateWin) {
+        board[immediateWin.row][immediateWin.col] = 2;
+        drawBoard();
+        if (checkWin(immediateWin.row, immediateWin.col, 2)) {
+          gameOver = true;
+          messageDiv.textContent = "電腦獲勝！";
+        } else {
+          currentPlayer = 1;
+          messageDiv.textContent = "玩家下棋 (黑子)";
+        }
+        return;
+      }
+
+      const iterations = parseInt(difficultySelect.value);
+      const move = mctsMove(iterations);
+      if (move) {
+        board[move.row][move.col] = 2;
+        drawBoard();
+        if (checkWin(move.row, move.col, 2)) {
+          gameOver = true;
+          messageDiv.textContent = "電腦獲勝！";
+          return;
+        }
+        currentPlayer = 1;
+        messageDiv.textContent = "玩家下棋 (黑子)";
+      }
+    }
+
+    resetButton.addEventListener("click", initBoard);
+    initBoard();
+  </script>
+</body>
+</html>
